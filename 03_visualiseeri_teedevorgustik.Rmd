@@ -1,0 +1,188 @@
+---
+title: "Teedevõrgustik Eesti linnades"
+output: html_notebook
+---
+
+Eesmärk on visualiseerida erinevate Eesti asukohtade teedevõrgustiku 1 km raaduse ringidena.
+Aluseks võetud blogipstitus http://geoffboeing.com/2017/01/square-mile-street-network-visualization/
+
+Vajalikud teedevõrgustiku andmed tulevad OSM andmebaasist
+
+```{r setup}
+library(osmdata)
+library(tidyverse)
+library(mapview)
+library(ggthemes)
+library(googleway)
+library(patchwork)
+library(sf)
+
+# lae google API võti geokodeerimiseks
+source("credentials.R")
+```
+
+Funktsioon, mis laeb valitud asukoha kohta teedevõrgustiku andmed 1 km raadiusega buffri seest.
+```{r}
+loika_tanavad <- function(asukoht){
+  Sys.sleep(1)
+  
+  # Eesti projektsiooni kirjeldus, mis on vajalik andmete kaardile kandmiseks
+  eesti_proj4 <- "+proj=lcc +lat_1=59.33333333333334 +lat_2=58 +lat_0=57.51755393055556 +lon_0=24 +x_0=500000 +y_0=6375000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
+  
+  # utf8 encoding, et vältida täpitähtede probleemi geocode funktsioonis
+  asukoht_utf8 <- enc2utf8(asukoht)
+  
+  # geokodeeri valitud asukoht
+  asukoha_koordinaadid_raw <- googleway::google_geocode(asukoht_utf8, 
+                                                        key = key_geocode)
+  
+  # eralda valitud asukoha koordinaadid
+  asukoha_koordinaadid <- asukoha_koordinaadid_raw$results$geometry$location
+  
+  # muuda sf formaati
+  asukoht_sf_raw <- st_as_sf(asukoha_koordinaadid, 
+                        coords = c("lng", "lat"), crs = 4326)
+  
+  # muuda Eesti koordinaatsüsteemiks, et saaks buffri võtta meetritega
+  asukoht_sf <- st_transform(asukoht_sf_raw, crs = eesti_proj4)
+  
+  # leia 1km diameetriga buffer polügon ümber asukoha
+  asukoht_buffer <- st_buffer(asukoht_sf, dist = 1000)
+  
+  # leia ruut ümber buffri, et sell järgi laadida alla teedevõrgustiku andmed
+  asukoht_grid <- st_make_grid(asukoht_buffer, n = 1)
+  
+  # leia buffrit ümbritseva ruudu nurkade koordinaadid
+  # nende abil pärin OSM kaardiandmed.
+  # muuda koordinaatsüsteemi, et tulemus oleks lat/long formaadis
+  asukoht_grid_bbox <- as.vector(st_bbox(st_transform(asukoht_grid, crs = 4326)))
+  
+  # koosta OSM päring valitud ruudu kohta
+  teede_paring <- opq(bbox = asukoht_grid_bbox)
+  
+  # päringus ainult teedevõrgustik
+  teede_paring <- add_osm_feature(teede_paring, key = 'highway')
+
+  # päri teede andmed
+  teed_raw <- osmdata_sf(teede_paring)
+  
+  # teede objekt OSM päringu tulemustest Eesti koordinaatsüsteemis
+  teed_lines <- st_transform(teed_raw$osm_lines, crs = eesti_proj4)
+
+  # lõika buffri järgi välja ühisosa teede kaardist
+  asukoht_teed <- st_intersection(asukoht_buffer, teed_lines) %>% 
+    mutate(asukoht = str_to_upper(asukoht_utf8))
+  
+  return(asukoht_teed)
+}
+
+# funktsioon, et error päringus annaks NULL väärtuse
+loika_tanavad_possibly <- possibly(loika_tanavad, NULL)
+```
+
+Otsi huvitavaid linnasid, mida visualiseerida
+```{r}
+mapview(loika_tanavad_possibly("Loomaaed, Tallinn"))
+```
+
+
+Linnade ja linnaosade nimekiri, mida visualiseerida
+```{r}
+linnad <- c(
+  "Tallinn",
+  "Tartu",
+  "Pärnu",
+  "Kuressaare",
+  "Sillamäe",
+  "Viljandi",
+  "Keila",
+  "Rakvere"
+)
+
+linnaosad <- c(
+  "Pirita, Tallinn",
+  "Haabersti, Tallinn",
+  "Mustamäe, Tallinn",
+  "Nõmme, Tallinn",
+  "Kesklinn, Tallinn", 
+  "Kristiine, Tallinn",
+  "Põhja-Tallinn, Tallinn",
+  "Lasnamäe, Tallinn"
+)
+
+tallinn_muu <- c(
+  "Vanalinn, Tallinn",
+  "Kadriorg, Tallinn",
+  "Loomaaed, Tallinn",
+  "Pelguranna, Tallinn"
+)
+```
+
+Lae eraldi listidesse linnade, Tallinna linnaosade ja muude Tallinna piirkondade kaardi andmed
+```{r, warning=FALSE}
+linnaosad_teed <- map(linnaosad, loika_tanavad_possibly)
+
+linnad_teed <- map(linnad, loika_tanavad_possibly)
+
+tallinn_teed <- map(tallinn_muu, loika_tanavad_possibly)
+```
+
+Salvesta kõik teede objektid, et neid blogipostituses visualiseerida
+```{r}
+save(linnaosad_teed, linnad_teed, tallinn_teed, file = "data/teedevorgustik.RData")
+```
+
+
+Funktsioon teedevõrgustiku visualiseerimiseks
+```{r}
+visualiseeri_teed <- function(df){
+  # kui palju sf objekte listis on?
+  len <- length(df)
+  
+  # funktsioon iga SF objekti visualiseerimiseks
+  visualiseeri <- function(x){
+    df[[x]] %>% 
+      ggplot() +
+      geom_sf(size = 0.5, color = "red") +
+      theme_map() +
+      # vajalik, et mitte kuvada koorninaatvõrgustikku
+      coord_sf(crs = st_crs(df[[x]]), datum = NA) +
+      # pealkirjas asukoha nimiest esimene sõna
+      labs(title = str_replace(word(unique(df[[x]]$asukoht), 1), ",", "")) +
+      theme(
+        plot.title = element_text(hjust = 0.5,
+                                  face = "bold",
+                                  size = 15)) +
+      guides(size = FALSE)
+  }
+  
+  # visualiseeri iga listi kuuluv SF objekt
+  visuaal <- map(seq(1:len), visualiseeri)
+  
+  return(visuaal)
+}
+```
+
+Visualiseeri linnaosade teedevõrgustik ühte listi
+```{r}
+linnaosad_teed_kaart <- visualiseeri_teed(linnaosad_teed)
+
+linnad_teed_kaart <- visualiseeri_teed(linnad_teed)
+
+tallinn_teed_kaart <- visualiseeri_teed(tallinn_teed)
+```
+
+Tallinna linnaosade teedevõrgustik kaardil
+```{r linnaosad, fig.width=8, fig.height=16}
+wrap_plots(linnaosad_teed_kaart, ncol = 2)
+```
+Linnade teedevõrgustik kaardil
+```{r linnad, fig.width=8, fig.height=16}
+wrap_plots(linnad_teed_kaart, ncol = 2)
+```
+
+
+Tallinna muude asukohtade teedevõrgustik kaardil
+```{r tallinn_muud, fig.width=8, fig.height=8}
+wrap_plots(tallinn_teed_kaart, ncol = 2)
+```

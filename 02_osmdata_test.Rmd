@@ -1,0 +1,230 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(osmdata)
+library(tidyverse)
+library(mapview)
+library(ggmap)
+library(ggthemes)
+library(googleway)
+library(patchwork)
+```
+
+```{r}
+q <- opq(bbox = 'Nõmme, Tallinn, Estonia')
+q <- add_osm_feature(q, key = 'highway')
+
+nomme <- osmdata_sf(q)
+```
+
+```{r}
+nomme$osm_lines %>% 
+  count(highway, sort = TRUE)
+```
+
+```{r}
+nomme$osm_lines %>% 
+  # filter(highway == "primary") %>% 
+  mapview()
+```
+
+```{r}
+# Eesti projektsiooni kirjeldus, mis on vajalik andmete kaardile kandmiseks
+eesti_proj4 <- "+proj=lcc +lat_1=59.33333333333334 +lat_2=58 +lat_0=57.51755393055556 +lon_0=24 +x_0=500000 +y_0=6375000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
+
+kaubanduskeskused_sf <- kaubanduskeskused %>% 
+  # muuda sf objektiks nii, et veerud lon ja lat on koordinaatidega
+  # crs väärtus 4326 annab õige projektsiooni
+  st_as_sf(coords = c("lon", "lat"), crs = 4326, remove = FALSE) %>% 
+  # muuda eesti projektsiooni, et arvutused õigesti teha
+  st_transform(eesti_proj4)
+  
+# kanna näidis andmed kaardile
+kaubanduskeskused_sf %>% 
+  mapview()
+```
+
+
+```{r}
+head(nomme$osm_lines, 2)
+
+st_crs(nomme$osm_lines)
+```
+
+
+```{r}
+keskus <- geocode(enc2utf8("Nõmme, Tallinn"))
+```
+
+```{r}
+keskus_sf <- st_as_sf(keskus, coords = c("lon", "lat"), crs = 4326)
+keskus_crs <- st_transform(keskus_sf, crs = eesti_proj4)
+```
+
+```{r}
+mapview(keskus_crs)
+```
+
+```{r}
+keskus_buffer <- st_buffer(keskus_crs, dist = 1000)
+```
+
+```{r}
+mapview(keskus_buffer)
+```
+
+```{r}
+nomme_sf <- st_transform(nomme$osm_lines, crs = eesti_proj4)
+
+keskus_teed <- st_intersection(keskus_buffer, nomme_sf)
+```
+
+```{r}
+mapview(keskus_teed)
+```
+
+
+```{r}
+keskus_teed %>% 
+  mutate(joone_paksus = ifelse(highway == "residential", 1, 1.2)) %>% 
+  ggplot() +
+  geom_sf(aes(size = joone_paksus), color = "white") +
+  scale_size_continuous(range = c(0.7, 1.5)) +
+  theme_map() +
+  coord_sf(crs = st_crs(keskus_teed), datum = NA) +
+  labs(title = "NÕMME") +
+  theme(
+    plot.background = element_rect(fill = "black"),
+    plot.title = element_text(colour = "white",
+                              hjust = 0.5,
+                              face = "bold",
+                              size = 16,
+                              family = "Roboto Condensed")) +
+  guides(size = FALSE)
+```
+
+```{r}
+keskus_teed %>% 
+  count(highway, sort = TRUE)
+```
+```{r}
+keskus_grid <- st_make_grid(keskus_buffer, n = 1)
+```
+
+
+```{r}
+mapview(keskus_grid)
+```
+
+```{r}
+box <- as.vector(st_bbox(st_transform(keskus_grid, crs = 4326)))
+```
+
+```{r}
+q2 <- opq(bbox = box)
+q2 <- add_osm_feature(q2, key = 'highway')
+
+nomme2 <- osmdata_sf(q2)
+```
+
+```{r}
+mapview(nomme2$osm_lines) + mapview(keskus_grid) + mapview(keskus_buffer)
+```
+
+```{r}
+loika_tanavad <- function(asukoht){
+  Sys.sleep(1)
+  
+  # Eesti projektsiooni kirjeldus, mis on vajalik andmete kaardile kandmiseks
+  eesti_proj4 <- "+proj=lcc +lat_1=59.33333333333334 +lat_2=58 +lat_0=57.51755393055556 +lon_0=24 +x_0=500000 +y_0=6375000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
+  
+  # utf8 encoding, et vältida täpitähtede probleemi geocode funktsioonis
+  asukoht_utf8 <- enc2utf8(asukoht)
+  
+  # lae google API võti geokodeerimiseks
+  source("config.R")
+  
+  # geokodeeri valitud asukoht
+  asukoha_koordinaadid_raw <- googleway::google_geocode(asukoht_utf8, 
+                                                        key = key_geocode)
+  
+  # eralda valitud asukoha koordinaadid
+  asukoha_koordinaadid <- asukoha_koordinaadid_raw$results$geometry$location
+  
+  # muuda sf formaati
+  asukoht_sf_raw <- st_as_sf(asukoha_koordinaadid, 
+                        coords = c("lng", "lat"), crs = 4326)
+  
+  # muuda Eesti koordinaatsüsteemiks, et saaks buffri võtta meetritega
+  asukoht_sf <- st_transform(asukoht_sf_raw, crs = eesti_proj4)
+  
+  # leia 1km diameetriga buffer polügon ümber asukoha
+  asukoht_buffer <- st_buffer(asukoht_sf, dist = 1000)
+  
+  # leia ruut ümber buffri, et sell järgi laadida alla teedevõrgustiku andmed
+  asukoht_grid <- st_make_grid(asukoht_buffer, n = 1)
+  
+  # leia buffrit ümbritseva ruudu nurkade koordinaadid
+  # nende abil pärin OSM kaardiandmed.
+  # muuda koordinaatsüsteemi, et tulemus oleks lat/long formaadis
+  asukoht_grid_bbox <- as.vector(st_bbox(st_transform(asukoht_grid, crs = 4326)))
+  
+  # koosta OSM päring valitud ruudu kohta
+  teede_paring <- opq(bbox = asukoht_grid_bbox)
+  
+  # päringus ainult teedevõrgustik
+  teede_paring <- add_osm_feature(teede_paring, key = 'highway')
+
+  # päri teede andmed
+  teed_raw <- osmdata_sf(teede_paring)
+  
+  # teede objekt OSM päringu tulemustest Eesti koordinaatsüsteemis
+  teed_lines <- st_transform(teed_raw$osm_lines, crs = eesti_proj4)
+
+  # lõika buffri järgi välja ühisosa teede kaardist
+  asukoht_teed <- st_intersection(asukoht_buffer, teed_lines) %>% 
+    mutate(asukoht = str_to_upper(asukoht_utf8))
+  
+  return(asukoht_teed)
+}
+```
+
+```{r}
+mitu <- map(c("Haapsalu", "Tartu", "Tallinn", "Laulasmaa", "Käsmu", "Pärnu"), possibly(loika_tanavad, NULL))
+```
+
+```{r}
+mitu_ggplot <- map(1:6, function(x){
+  mitu[[x]] %>% 
+  ggplot() +
+  geom_sf(size = 0.5, color = "red") +
+  theme_map() +
+  coord_sf(crs = st_crs(mitu[[x]]), datum = NA) +
+  labs(title = unique(mitu[[x]]$asukoht)) +
+  theme(
+    plot.title = element_text(hjust = 0.5,
+                              face = "bold",
+                              size = 15)) +
+  guides(size = FALSE)
+}
+  )
+```
+
+
+```{r fig.width=8, fig.height=12}
+wrap_plots(mitu_ggplot, ncol = 2)
+```
+
+```{r}
+map_df(1:6, function(x){as.data.frame(mitu[[x]][["highway"]])}) %>% 
+  select(highway = 1) %>% 
+  count(highway, sort = TRUE)
+```
+
+```{r}
+mitu_mapview
+```
+

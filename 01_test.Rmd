@@ -1,0 +1,69 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+knitr::opts_chunk$set(warning = TRUE)
+library(leaflet)
+library(dplyr)
+library(ggmap)
+library(sf)
+library(mapview)
+```
+
+```{r}
+eesti_teed_raw <- st_read("data/roads/gis.osm_roads_free_1.shp")
+```
+
+```{r}
+eesti_teed_raw %>% 
+  head(100) %>% 
+  as("Spatial") %>% 
+  mapview()
+  fortify() %>% 
+  View()
+  # nuuda sf element Spatial-ks, mida leaflet oskab kuvada
+  as("Spatial") %>%
+  leaflet() %>%
+  addPolylines()
+  addProviderTiles("CartoDB.DarkMatterNoLabels", group = "CartoDB") %>%
+  addPolygons(fillColor = ~pal(esmane_kasutus), 
+              color = "#b2aeae",
+              fillOpacity = 0.7, 
+              weight = 0.3, 
+              smoothFactor = 0.5,
+              popup = popup) %>%
+  addLegend(pal = pal, 
+            values = majad_tallinnas_vanusega$esmane_kasutus, 
+            position = "bottomright", 
+            title = "Hoone esmane kasutus",
+            labFormat = labelFormat(big.mark = "")) %>% 
+  setView(24.7467027, 59.4339144, zoom = 12)
+```
+
+
+```{r}
+tal <- geocode("Tallinn")
+haapsalu <- geocode("Haapsalu")
+
+```
+
+```{r}
+# Tallinna piirkonna koordinaadid
+tallinn <- c(left = 24.558454, bottom = 59.342081, right = 24.953275, 
+             top = 59.511817)
+
+# Tallinna aluskaart
+tallinna_kaart <- get_map(location = c(lon = tal$lon, lat = tal$lat), zoom = 17, source = "stamen", maptype = "terrain-lines")
+ggmap(tallinna_kaart)
+```
+
+
+
+```{r}
+leaflet() %>% 
+  addProviderTiles("CartoDB.PositronNoLabels") %>% 
+  setView(haapsalu$lon, haapsalu$lat, zoom = 17)
+```
+
